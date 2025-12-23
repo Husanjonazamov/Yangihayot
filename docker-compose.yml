@@ -1,0 +1,13 @@
+
+services:
+  bot:
+    build: .
+    container_name: yangihayot-bot
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - TOKEN=${TOKEN}  
+      - ADMIN_ID=${ADMIN_ID}
+    volumes:
+      - ./:/app
+    command: node bot.js
