@@ -122,8 +122,8 @@ bot.on("callback_query", async (q) => {
   try {
     if (data === "new_post") {
       clearUserState(userId);
-      userState[userId] = { action: "waiting_photo" };
-      await bot.sendMessage(userId, "📸 *Yangi post uchun rasm yuboring*\n\nBekor qilish uchun tugma:", {
+      userState[userId] = { action: "waiting_media" };
+      await bot.sendMessage(userId, "📸 *Yangi post uchun rasm yoki video yuboring*\n\nBekor qilish uchun tugma:", {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "❌ Bekor qilish", callback_data: "cancel" }]] }
       });
@@ -168,16 +168,31 @@ bot.on("callback_query", async (q) => {
       if (!post) return;
 
       const date = new Date(Number(postId)).toLocaleString("uz-UZ");
-      await bot.sendPhoto(userId, post.photo, {
-        caption: `*📸 Post ma'lumotlari*\n\n📅 Yuborilgan: ${date}\n❤️ Layklar: ${post.likes}\n\n${post.caption || "_Izoh yo‘q_"}`,
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "🗑 O‘chirish", callback_data: `delete_post_${post.id}` }],
-            [{ text: "◀️ Orqaga", callback_data: "manage_posts" }]
-          ]
-        }
-      });
+      let captionText = `*📸 Post ma'lumotlari*\n\n📅 Yuborilgan: ${date}\n❤️ Layklar: ${post.likes}\n\n${post.caption || "_Izoh yo‘q_"}`;
+
+      if (post.type === "photo") {
+        await bot.sendPhoto(userId, post.fileId, {
+          caption: captionText,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🗑 O‘chirish", callback_data: `delete_post_${post.id}` }],
+              [{ text: "◀️ Orqaga", callback_data: "manage_posts" }]
+            ]
+          }
+        });
+      } else if (post.type === "video") {
+        await bot.sendVideo(userId, post.fileId, {
+          caption: captionText,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🗑 O‘chirish", callback_data: `delete_post_${post.id}` }],
+              [{ text: "◀️ Orqaga", callback_data: "manage_posts" }]
+            ]
+          }
+        });
+      }
 
     } else if (data.startsWith("delete_post_")) {
       const postId = data.split("_")[2];
@@ -313,26 +328,39 @@ bot.on("callback_query", async (q) => {
   }
 });
 
-// Rasm qabul qilish
-bot.on("photo", (msg) => {
+// Media (rasm yoki video) qabul qilish
+bot.on("photo", handleMedia);
+bot.on("video", handleMedia);
+
+async function handleMedia(msg) {
   const userId = msg.from.id;
   if (userId !== ADMIN_ID) return;
 
-  console.log(`📸 Admin rasm yubordi (User ID: ${userId})`);
+  console.log(`📸 Admin media yubordi (User ID: ${userId})`);
 
-  if (!userState[userId] || userState[userId].action !== "waiting_photo") {
+  if (!userState[userId] || userState[userId].action !== "waiting_media") {
     bot.sendMessage(userId, "❌ Avval \"Yangi post qo'shish\" ni bosing.");
     return;
   }
 
-  const fileId = msg.photo[msg.photo.length - 1].file_id;
-  userState[userId] = { ...userState[userId], action: "waiting_caption", photo: fileId };
+  let fileId, type;
+  if (msg.photo) {
+    fileId = msg.photo[msg.photo.length - 1].file_id;
+    type = "photo";
+  } else if (msg.video) {
+    fileId = msg.video.file_id;
+    type = "video";
+  } else {
+    return;
+  }
 
-  bot.sendMessage(userId, "✅ Rasm qabul qilindi!\n\n✍️ Izoh (caption) yozing (bo‘sh qoldirsangiz ham bo‘ladi):", {
+  userState[userId] = { ...userState[userId], action: "waiting_caption", fileId, type };
+
+  bot.sendMessage(userId, "✅ Media qabul qilindi!\n\n✍️ Izoh (caption) yozing (bo‘sh qoldirsangiz ham bo‘ladi):", {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: [[{ text: "❌ Bekor qilish", callback_data: "cancel" }]] }
   });
-});
+}
 
 // Caption va post yuborish
 bot.on("text", async (msg) => {
@@ -342,14 +370,16 @@ bot.on("text", async (msg) => {
   if (!userState[userId] || userState[userId].action !== "waiting_caption") return;
 
   const caption = msg.text.trim() || undefined;
-  const photo = userState[userId].photo;
+  const fileId = userState[userId].fileId;
+  const type = userState[userId].type;
   clearUserState(userId);
 
   console.log(`📝 Admin post yaratmoqda. Caption: ${caption ? caption.substring(0, 50) : "yo'q"}`);
 
   const post = {
     id: Date.now().toString(),
-    photo: photo,
+    fileId: fileId,
+    type: type,
     caption: caption,
     likes: 0,
     likedUsers: new Set(),
@@ -360,7 +390,8 @@ bot.on("text", async (msg) => {
   let successCount = 0;
   for (let channel of CHANNELS) {
     try {
-      const sent = await bot.sendPhoto(channel, photo, {
+      let sent;
+      const options = {
         caption: caption,
         parse_mode: "Markdown",
         reply_markup: {
@@ -369,7 +400,14 @@ bot.on("text", async (msg) => {
             { text: "🔔 Obuna bo‘lish", url: SUBSCRIBE_URL }
           ]]
         }
-      });
+      };
+
+      if (type === "photo") {
+        sent = await bot.sendPhoto(channel, fileId, options);
+      } else if (type === "video") {
+        sent = await bot.sendVideo(channel, fileId, options);
+      }
+
       post.messageIds[channel] = sent.message_id;
       successCount++;
       console.log(`   ✅ ${channel} ga post yuborildi (msg_id: ${sent.message_id})`);
