@@ -68,6 +68,43 @@ function savePosts() {
 
 loadPosts();
 
+// Bot username (will be set after bot info is fetched)
+let BOT_USERNAME = null;
+let botUsernameReady = false;
+
+// Get bot info to retrieve username (must be ready before posts can be created)
+(async () => {
+  try {
+    const me = await bot.getMe();
+    BOT_USERNAME = me.username;
+    botUsernameReady = true;
+    console.log(`✅ Bot username: @${BOT_USERNAME}`);
+  } catch (err) {
+    console.error("❌ Bot ma'lumotlarini olishda xato:", err.message);
+  }
+})();
+
+// Helper function to build caption with like count and subscribe link
+function buildCaption(originalCaption, likes, postId) {
+  // Create deep link for like button that works even when forwarded
+  if (!BOT_USERNAME) {
+    console.warn("⚠️ BOT_USERNAME hali tayyor emas! Like link ishlamaydi.");
+  }
+  
+  const likeLink = BOT_USERNAME 
+    ? `https://t.me/${BOT_USERNAME}?start=like_${postId}`
+    : `#like_${postId}`; // Fallback if username not ready yet
+  
+  const likeButtonText = `[❤️ Layk (${likes})](${likeLink})`;
+  const subscribeLink = `\n🔔 [Obuna bo'lish](${SUBSCRIBE_URL})`;
+  
+  if (originalCaption) {
+    return `${originalCaption}\n\n${likeButtonText}${subscribeLink}`;
+  } else {
+    return `${likeButtonText}${subscribeLink}`;
+  }
+}
+
 // Foydalanuvchi holati
 let userState = {};
 
@@ -91,10 +128,124 @@ function showMainMenu(chatId) {
 }
 
 // /start
-bot.onText(/\/start/, (msg) => {
-  if (msg.from.id !== ADMIN_ID) return;
-  console.log(`👤 Admin /start buyrug'i oldi: ${msg.from.id} (${msg.from.username || msg.from.first_name})`);
-  clearUserState(msg.from.id);
+bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const userId = msg.from.id;
+  const param = match[1]; // Get the parameter after /start
+  
+  // Handle like command from forwarded messages
+  if (param && param.startsWith('like_')) {
+    const postId = param.split('_')[1];
+    const post = posts.find(p => p.id === postId);
+    
+    if (!post) {
+      await bot.sendMessage(userId, "❌ Post topilmadi.");
+      return;
+    }
+    
+    const username = msg.from.username ? `@${msg.from.username}` : msg.from.first_name || "Noma'lum";
+    console.log(`\n❤️ LIKE BOSILDI (deep link)!`);
+    console.log(`👤 Foydalanuvchi: ${userId} (${username})`);
+    console.log(`📸 Post ID: ${postId}`);
+    console.log(`🔍 Obuna tekshiruvi boshlanmoqda...`);
+    
+    try {
+      let unsubscribedChannels = [];
+      
+      const checks = CHANNELS.map(async (channel) => {
+        try {
+          const member = await bot.getChatMember(channel, userId);
+          console.log(`   ✅ ${channel} → Status: ${member.status}`);
+          
+          if (["member", "administrator", "creator"].includes(member.status)) {
+            return null;
+          } else {
+            console.log(`   ❌ ${channel} → Obuna yo'q (status: ${member.status})`);
+            return channel;
+          }
+        } catch (err) {
+          console.error(`   ❌ ${channel} → getChatMember XATOSI: ${err.message}`);
+          return channel;
+        }
+      });
+      
+      const results = await Promise.all(checks);
+      unsubscribedChannels = results.filter(ch => ch !== null);
+      
+      if (unsubscribedChannels.length > 0) {
+        console.log(`🚫 LIKE RAD ETILDI! Obuna bo'lmagan kanallar: ${unsubscribedChannels.join(", ")}`);
+        
+        const buttons = unsubscribedChannels.map(ch => {
+          const url = ch.startsWith("@")
+            ? `https://t.me/${ch.substring(1)}`
+            : `https://t.me/c/${ch.replace(/^-100/, '')}`;
+          return [{ text: `Obuna bo'lish ${ch}`, url }];
+        });
+        
+        await bot.sendMessage(userId, "❗ Layk bosish uchun quyidagi kanal(lar)ga obuna bo'ling:", {
+          reply_markup: { inline_keyboard: buttons }
+        });
+        return;
+      }
+      
+      console.log(`✅ Barcha kanallarga obuna bor!`);
+      
+      if (post.likedUsers.has(userId)) {
+        console.log(`🔁 Bu foydalanuvchi allaqachon like bosgan!`);
+        await bot.sendMessage(userId, "❗ Siz allaqachon layk bosgansiz!");
+        return;
+      }
+      
+      post.likes++;
+      post.likedUsers.add(userId);
+      savePosts();
+      
+      console.log(`🎉 LIKE QO'SHILDI! Yangi layklar soni: ${post.likes}`);
+      
+      // Update messages in channels
+      const updatedCaption = buildCaption(post.caption, post.likes, post.id);
+      const updatedButtons = {
+        inline_keyboard: [[
+          { text: `❤️ Layk (${post.likes})`, callback_data: `like_${post.id}` },
+          { text: "🔔 Obuna bo'lish", url: SUBSCRIBE_URL }
+        ]]
+      };
+      
+      for (let [channel, msgId] of Object.entries(post.messageIds)) {
+        try {
+          await bot.editMessageCaption(updatedCaption, {
+            chat_id: channel,
+            message_id: msgId,
+            parse_mode: "Markdown"
+          });
+          
+          await bot.editMessageReplyMarkup(updatedButtons, {
+            chat_id: channel,
+            message_id: msgId
+          });
+          
+          console.log(`   ✅ Xabar yangilandi: ${channel} (msg_id: ${msgId}) - Layklar: ${post.likes}`);
+        } catch (err) {
+          if (!err.message.includes("message not modified")) {
+            console.error(`   ❌ Xabar yangilash xatosi (${channel}):`, err.message);
+          }
+        }
+      }
+      
+      await bot.sendMessage(userId, "❤️ Laykingiz qabul qilindi!");
+      console.log(`✅ Like jarayoni muvaffaqiyatli yakunlandi.\n`);
+      
+    } catch (err) {
+      console.error("💥 Like jarayonida katta xato:", err);
+      await bot.sendMessage(userId, "❌ Xato yuz berdi!");
+    }
+    
+    return;
+  }
+  
+  // Admin menu (original behavior)
+  if (userId !== ADMIN_ID) return;
+  console.log(`👤 Admin /start buyrug'i oldi: ${userId} (${msg.from.username || msg.from.first_name})`);
+  clearUserState(userId);
   showMainMenu(msg.chat.id);
 });
 
@@ -303,18 +454,34 @@ bot.on("callback_query", async (q) => {
 
     console.log(`🎉 LIKE QO'SHILDI! Yangi layklar soni: ${post.likes}`);
 
+    // Build updated caption with new like count
+    const updatedCaption = buildCaption(post.caption, post.likes, post.id);
+    const updatedButtons = {
+      inline_keyboard: [[
+        { text: `❤️ Layk (${post.likes})`, callback_data: `like_${post.id}` },
+        { text: "🔔 Obuna bo'lish", url: SUBSCRIBE_URL }
+      ]]
+    };
+    
     for (let [channel, msgId] of Object.entries(post.messageIds)) {
       try {
-        await bot.editMessageReplyMarkup({
-          inline_keyboard: [[
-            { text: `❤️ Layk (${post.likes})`, callback_data: `like_${post.id}` },
-            { text: "🔔 Obuna bo‘lish", url: SUBSCRIBE_URL }
-          ]]
-        }, { chat_id: channel, message_id: msgId });
-        console.log(`   ✅ Tugma yangilandi: ${channel} (msg_id: ${msgId})`);
+        // Update caption with like count and subscribe link
+        await bot.editMessageCaption(updatedCaption, {
+          chat_id: channel,
+          message_id: msgId,
+          parse_mode: "Markdown"
+        });
+        
+        // Update buttons with new like count
+        await bot.editMessageReplyMarkup(updatedButtons, {
+          chat_id: channel,
+          message_id: msgId
+        });
+        
+        console.log(`   ✅ Xabar yangilandi: ${channel} (msg_id: ${msgId}) - Layklar: ${post.likes}`);
       } catch (err) {
         if (!err.message.includes("message not modified")) {
-          console.error(`   ❌ Tugma yangilash xatosi (${channel}):`, err.message);
+          console.error(`   ❌ Xabar yangilash xatosi (${channel}):`, err.message);
         }
       }
     }
@@ -391,13 +558,16 @@ bot.on("text", async (msg) => {
   for (let channel of CHANNELS) {
     try {
       let sent;
+      // Build caption with subscribe link and like button (like count starts at 0)
+      const captionWithLink = buildCaption(caption, 0, post.id);
+      
       const options = {
-        caption: caption,
+        caption: captionWithLink,
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [[
             { text: "❤️ Layk (0)", callback_data: `like_${post.id}` },
-            { text: "🔔 Obuna bo‘lish", url: SUBSCRIBE_URL }
+            { text: "🔔 Obuna bo'lish", url: SUBSCRIBE_URL }
           ]]
         }
       };
@@ -427,8 +597,20 @@ bot.on("text", async (msg) => {
 });
 
 // Bot ishga tushdi
-console.log("🤖 Bot muvaffaqiyatli ishga tushdi!");
-console.log(`👤 Admin ID: ${ADMIN_ID}`);
-console.log(`📢 Kanallar: ${CHANNELS.join(", ")}`);
-console.log(`🔔 Obuna linki: ${SUBSCRIBE_URL}`);
-showMainMenu(ADMIN_ID);
+(async () => {
+  // Wait a bit for bot username to be ready (usually instant, but just in case)
+  let retries = 10;
+  while (!botUsernameReady && retries > 0) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    retries--;
+  }
+  
+  console.log("🤖 Bot muvaffaqiyatli ishga tushdi!");
+  console.log(`👤 Admin ID: ${ADMIN_ID}`);
+  console.log(`📢 Kanallar: ${CHANNELS.join(", ")}`);
+  console.log(`🔔 Obuna linki: ${SUBSCRIBE_URL}`);
+  if (BOT_USERNAME) {
+    console.log(`🤖 Bot username: @${BOT_USERNAME}`);
+  }
+  showMainMenu(ADMIN_ID);
+})();
